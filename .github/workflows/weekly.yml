@@ -1,0 +1,66 @@
+name: Weekly Database Backup (Pre-release)
+
+on:
+  schedule:
+    - cron: "0 2 * * 1" # Every Monday 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lz4 git
+
+      - name: Prepare metadata
+        id: meta
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          LAST_TAG=$(git tag --sort=-creatordate | head -n 1 || true)
+
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s")
+            COUNT=$(git rev-list --count HEAD)
+          else
+            COMMITS=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s")
+            COUNT=$(git rev-list --count "$LAST_TAG"..HEAD)
+          fi
+
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+          {
+            echo "###  Weekly LibreLens DB Backup"
+            echo ""
+            echo "**Date:** $DATE"
+            echo "**Commits since last release:** $COUNT"
+            echo ""
+            echo "###  Changes"
+            echo "$COMMITS"
+          } > release_notes.md
+
+      - name: Create compressed archive (.tar.lz4)
+        run: |
+          tar --exclude=.git -cf - . | lz4 -19 > librelens-db-${{ steps.meta.outputs.date }}.tar.lz4
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create \
+            weekly-${{ steps.meta.outputs.date }} \
+            librelens-db-${{ steps.meta.outputs.date }}.tar.lz4 \
+            --prerelease \
+            --title "Weekly DB Backup - ${{ steps.meta.outputs.date }}" \
+            --notes-file release_notes.md
