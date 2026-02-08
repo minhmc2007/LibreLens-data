@@ -1,0 +1,75 @@
+name: Monthly Database Backup (Release)
+
+on:
+  schedule:
+    - cron: "0 3 1 * *" # 1st day of month, 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lz4 \
+            xz-utils \
+            p7zip-full \
+            rar \
+            zip
+
+      - name: Prepare metadata
+        id: meta
+        run: |
+          DATE=$(date -u +%Y-%m)
+          LAST_TAG=$(git tag --sort=-creatordate | head -n 1 || true)
+
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s")
+            COUNT=$(git rev-list --count HEAD)
+          else
+            COMMITS=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s")
+            COUNT=$(git rev-list --count "$LAST_TAG"..HEAD)
+          fi
+
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+
+          {
+            echo "###  Monthly LibreLens DB Backup"
+            echo ""
+            echo "**Month:** $DATE"
+            echo "**Commits since last release:** $COUNT"
+            echo ""
+            echo "###  Changes"
+            echo "$COMMITS"
+          } > release_notes.md
+
+      - name: Create archives
+        run: |
+          BASENAME=librelens-db-${{ steps.meta.outputs.date }}
+
+          tar --exclude=.git -cf - . | lz4 -19 > $BASENAME.tar.lz4
+          tar --exclude=.git -cJf $BASENAME.tar.xz .
+          zip -r9 $BASENAME.zip . -x ".git/*"
+          7z a -mx=9 $BASENAME.7z . -xr!.git
+          rar a -m5 $BASENAME.rar . -x.git
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create \
+            monthly-${{ steps.meta.outputs.date }} \
+            librelens-db-${{ steps.meta.outputs.date }}.* \
+            --title "Monthly DB Backup - ${{ steps.meta.outputs.date }}" \
+            --notes-file release_notes.md
